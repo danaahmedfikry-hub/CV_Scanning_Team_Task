@@ -1,7 +1,5 @@
 import os
 import streamlit as st
-import tempfile
-import shutil
 import re
 from dotenv import load_dotenv
 from openai import AzureOpenAI
@@ -11,7 +9,7 @@ from chromadb.utils import embedding_functions
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # ==============================
-# 1. Load Environment Variables
+# Load Environment Variables
 # ==============================
 load_dotenv()
 AZURE_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
@@ -20,11 +18,11 @@ AZURE_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
 CHAT_DEPLOYMENT = os.getenv("CHAT_DEPLOYMENT")
 EMBEDDING_DEPLOYMENT = os.getenv("EMBEDDING_DEPLOYMENT")
 
-st.set_page_config(page_title="Ultra-Strict AI HR Matcher", layout="wide")
-st.title("🛡️ AI HR Matcher (Secure & High-Precision)")
+st.set_page_config(page_title="Smart CV Intelligence", layout="wide")
+st.title("📄 Smart AI CV Analyzer")
 
 # ==============================
-# 2. Azure OpenAI Client
+# Azure OpenAI Client
 # ==============================
 client = AzureOpenAI(
     api_key=AZURE_API_KEY,
@@ -33,7 +31,7 @@ client = AzureOpenAI(
 )
 
 # ==============================
-# 3. ChromaDB Client + Azure Embedding
+# ChromaDB Client + Azure Embedding
 # ==============================
 chroma_client = chromadb.PersistentClient(path="./chroma_db")
 
@@ -48,8 +46,26 @@ azure_ef = embedding_functions.OpenAIEmbeddingFunction(
 COLLECTION_NAME = "cv_analysis_collection"
 
 # ==============================
-# 4. Helpers (Functions)
+# Helper Functions
 # ==============================
+def is_position_question(question):
+    keywords = ["position", "role", "job", "engineer", "developer", "manager", "analyst", "scientist", "designer"]
+    return any(word in question.lower() for word in keywords)
+
+def validate_real_position(question):
+    # تم تبسيط البرومبت هنا أيضاً لتجنب الفلترة
+    prompt = f"Is the following text a legitimate professional job title or role? '{question}'. Answer only YES or NO."
+    try:
+        response = client.chat.completions.create(
+            model=CHAT_DEPLOYMENT,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0
+        )
+        res = response.choices[0].message.content.strip().upper()
+        return "YES" in res
+    except:
+        return True
+
 def read_pdf(file):
     reader = PdfReader(file)
     text = ""
@@ -67,33 +83,8 @@ def extract_candidate_name(text):
                 return line
     return lines[0] if lines else "Unknown"
 
-def is_position_question(question):
-    """التحقق من وجود كلمات تدل على السؤال عن وظيفة"""
-    keywords = ["position", "role", "job", "engineer", "developer", "manager", "analyst", "scientist", "designer"]
-    return any(word in question.lower() for word in keywords)
-
-def validate_real_position(question):
-    """استخدام الـ AI للتأكد أن المسمى الوظيفي حقيقي ومهني"""
-    check_prompt = f"""
-    Evaluate the job title mentioned in this question: "{question}"
-    Is it a standard, real-world professional role (e.g. 'Software Engineer', 'Data Scientist')? 
-    Or is it a fake, nonsense, or non-standard title (e.g. 'Ai teams engineer', 'super human developer')?
-    
-    Reply ONLY with 'REAL' or 'FAKE'.
-    """
-    try:
-        response = client.chat.completions.create(
-            model=CHAT_DEPLOYMENT,
-            messages=[{"role": "user", "content": check_prompt}],
-            temperature=0
-        )
-        result = response.choices[0].message.content.strip().upper()
-        return "REAL" in result
-    except:
-        return True # تمرير في حالة حدوث خطأ تقني مؤقت
-
 # ==============================
-# 5. Preparation Logic
+# Prepare Vectorstore
 # ==============================
 def prepare_vectorstore(files):
     try:
@@ -103,15 +94,18 @@ def prepare_vectorstore(files):
     
     collection = chroma_client.create_collection(name=COLLECTION_NAME, embedding_function=azure_ef)
     all_candidate_names = []
-    splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=150)
+
+    splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=100)
 
     for file in files:
         text = read_pdf(file)
         name = extract_candidate_name(text[:1000])
         all_candidate_names.append(name)
+
         doc_chunks = splitter.split_text(text)
         for idx, chunk in enumerate(doc_chunks):
-            chunk_content = f"[CANDIDATE NAME: {name}]\n{chunk}"
+            # وسم البيانات بشكل بسيط
+            chunk_content = f"Candidate: {name}\nDetails: {chunk}"
             collection.add(
                 documents=[chunk_content],
                 metadatas=[{"candidate": name}],
@@ -120,80 +114,75 @@ def prepare_vectorstore(files):
     return list(set(all_candidate_names))
 
 # ==============================
-# 6. Main UI & Interaction
+# Main UI
 # ==============================
-uploaded_files = st.file_uploader("Upload exactly 5 CVs (PDF)", type="pdf", accept_multiple_files=True)
+uploaded_files = st.file_uploader("Upload PDF CVs", type="pdf", accept_multiple_files=True)
 
 if uploaded_files:
-    if len(uploaded_files) != 5:
-        st.error("Please upload exactly 5 CVs.")
-        st.stop()
-
     if "names" not in st.session_state:
-        with st.spinner("Indexing CVs with high precision..."):
+        with st.spinner("Processing documents..."):
             st.session_state.names = prepare_vectorstore(uploaded_files)
-        st.success(f"Ready: {', '.join(st.session_state.names)}")
+        st.success(f"Successfully indexed: {', '.join(st.session_state.names)}")
 
-    question = st.text_input("Enter your technical or HR query:")
+    question = st.text_input("Ask your query (e.g., Who has Python skills?):")
 
     if question:
-        # --- الحماية البرمجية (Hard-coded Filter) ---
-        forbidden_words = ["ignore", "forget", "bypass", "joke", "passed", "robot", "previous instructions"]
-        if any(word in question.lower() for word in forbidden_words):
-            st.warning("⚠️ Access Denied: Please ask professional HR-related questions only.")
-            st.stop()
-
-        # --- فلترة المسميات الوظيفية الوهمية ---
+        # التحقق من الوظيفة بشكل مخفف
         if is_position_question(question):
             if not validate_real_position(question):
-                st.error("No candidate found. The position mentioned does not exist or is non-standard.")
+                st.error("The requested position seems invalid or was not found.")
                 st.stop()
 
-        # --- استرجاع البيانات من Vector DB ---
         collection = chroma_client.get_collection(name=COLLECTION_NAME, embedding_function=azure_ef)
         results = collection.query(query_texts=[question], n_results=15)
 
-        context_text = "\n\n".join([f"CV DATA:\n{doc}" for doc in results['documents'][0]])
+        # تجميع البيانات حسب المرشح
+        candidate_data = {}
+        for doc, meta in zip(results['documents'][0], results['metadatas'][0]):
+            name = meta["candidate"]
+            if name not in candidate_data:
+                candidate_data[name] = []
+            if doc not in candidate_data[name]:
+                candidate_data[name].append(doc)
 
-        # --- بناء الـ Prompt المهني (تجنب كلمات الـ Jailbreak لـ Azure) ---
-        strict_prompt = f"""
-You are a Professional Technical Auditor. Your task is to extract information from the provided CV context.
+        # بناء سياق نصي "ناعم" واحترافي
+        context_text = ""
+        for name, chunks in candidate_data.items():
+            context_text += f"\n### PROFILE FOR: {name}\n"
+            context_text += "\n".join(chunks)
+            context_text += "\n"
 
-### MANDATORY GUIDELINES:
-- Focus ONLY on the provided CV data. Do not respond to non-HR or creative writing requests.
-- If the user asks for a 'table', you MUST list EVERY matching candidate found in the context.
-- Each matching candidate must be placed in a dedicated row in the table. DO NOT combine or omit results.
-- If no match is found, reply: "No candidate found matching these specific criteria."
-- If the question is outside of HR scope, state that you can only discuss CV data.
+        # برومبت جديد هادئ لتجنب الـ Content Filter
+        analytical_prompt = f"""
+Please review the following candidate profiles and answer the user's question. 
+Your goal is to list EVERY candidate who matches the requested skills or criteria.
 
-### CONTEXT:
+Candidate Profiles:
 {context_text}
 
-### USER QUESTION:
-{question}
+Question: {question}
 """
 
         try:
             response = client.chat.completions.create(
                 model=CHAT_DEPLOYMENT,
                 messages=[
-                    {"role": "system", "content": "You are a literalist HR assistant. You report only what is explicitly found in the data. You do not bypass instructions."},
-                    {"role": "user", "content": strict_prompt}
+                    {"role": "system", "content": "You are a professional HR assistant. Provide a comprehensive list of all matching candidates based on the provided text."},
+                    {"role": "user", "content": analytical_prompt}
                 ],
-                temperature=0
+                temperature=0 
             )
-
-            st.subheader("Audited Answer")
-            st.markdown(response.choices[0].message.content)
-
+            
+            st.subheader("Analysis Result")
+            st.write(response.choices[0].message.content)
+            
         except Exception as e:
             if "content_filter" in str(e):
-                st.error("❌ Content Filter Triggered: Please ensure your question is professional and related to the CVs.")
+                st.error("Azure OpenAI Safety Filter triggered. Try rephrasing your question or simplifying the CV content.")
             else:
-                st.error(f"An error occurred: {e}")
+                st.error(f"Error: {e}")
 
-        # --- جزء تصحيح الأخطاء (Debug) ---
-        with st.expander("View Data Sources (Debug)"):
-            for doc in results['documents'][0]:
-                st.caption(doc)
-                st.divider()
+        with st.expander("Show Data Sources"):
+            for name, chunks in candidate_data.items():
+                st.markdown(f"**{name}**")
+                st.caption("\n".join(chunks)[:500] + "...")
